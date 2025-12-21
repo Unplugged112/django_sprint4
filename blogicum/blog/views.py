@@ -10,14 +10,13 @@ from django.views.generic import (
 from django.contrib.auth.mixins import LoginRequiredMixin, UserPassesTestMixin
 from django.contrib.auth.models import User
 from django.db.models import Q
-from blog.utils import get_most_commented_posts
+from blog.utils import get_posts_with_comments
 
 
 class PostMixin:
     model = Post
     form_class = PostForm
     template_name = 'blog/create.html'
-    success_url = reverse_lazy('blog:index')
 
 
 class PostCreateView(LoginRequiredMixin, PostMixin, CreateView):
@@ -31,18 +30,29 @@ class PostCreateView(LoginRequiredMixin, PostMixin, CreateView):
 
 class PostUpdateView(LoginRequiredMixin, UserPassesTestMixin, PostMixin, UpdateView):
     def test_func(self):
-        return self.request.user == self.get_object().author
+        post_id = self.kwargs.get('post_id')
+        post = get_object_or_404(Post, pk=post_id)
+        return self.request.user == post.author
+    
+    def get_object(self, queryset=None):
+        post_id = self.kwargs.get('post_id')
+        return get_object_or_404(Post, pk=post_id)
     
     def get_success_url(self):
-        return reverse('blog:post_detail', kwargs={'pk': self.object.pk})
+        return reverse('blog:post_detail', kwargs={'post_id': self.object.pk})
 
 
 class PostDeleteView(LoginRequiredMixin, UserPassesTestMixin, DeleteView):
     model = Post
     template_name = "blog/create.html"
-
+    
+    def get_object(self, queryset=None):
+        post_id = self.kwargs.get('post_id')
+        return get_object_or_404(Post, pk=post_id)
+    
     def test_func(self):
-        return self.request.user == self.get_object().author
+        post = self.get_object()
+        return self.request.user == post.author
 
     def get_success_url(self):
         return reverse('blog:profile', kwargs={'username': self.request.user.username})
@@ -51,9 +61,10 @@ class PostDeleteView(LoginRequiredMixin, UserPassesTestMixin, DeleteView):
 class PostDetailView(DetailView):
     model = Post
     template_name = "blog/detail.html"
-
+    
     def get_object(self, queryset=None):
-        obj = super().get_object(queryset)
+        post_id = self.kwargs.get('post_id')
+        obj = get_object_or_404(Post, pk=post_id)
         user = self.request.user
 
         if obj.author == user:
@@ -80,25 +91,14 @@ class PostListView(ListView):
     paginate_by = 10
 
     def get_queryset(self):
-        current_time = timezone.now()
-        user = self.request.user
-
-        qs = Post.objects.select_related('category', 'author', 'location')
-
-        base_filter = Q(
-            pub_date__lte=current_time, 
-            is_published=True, 
-            category__is_published=True
+        # Оптимизируем запрос и получаем посты с комментариями
+        base_queryset = Post.objects.select_related('category', 'author', 'location')
+        
+        return get_posts_with_comments(
+            queryset=base_queryset,
+            user=self.request.user,
+            filter_published=True 
         )
-
-        if user.is_authenticated:
-            qs = qs.filter(base_filter | Q(author=user))
-        else:
-            qs = qs.filter(base_filter)
-
-        qs = get_most_commented_posts(qs)
-
-        return qs
 
 
 class CategoryPostListView(ListView):
@@ -107,17 +107,24 @@ class CategoryPostListView(ListView):
     context_object_name = 'post_list'
     paginate_by = 10
     
-    def get_queryset(self):
-        current_time = timezone.now()
+    def get_queryset(self):        
         self.category = get_object_or_404(
             Category.objects.filter(is_published=True),
             slug=self.kwargs['category_slug']
         )
-        return Post.objects.filter(
-            category=self.category,
-            is_published=True,
-            pub_date__lte=current_time
-        ).select_related('category', 'author', 'location')
+        
+        # Оптимизированный базовый запрос
+        base_queryset = Post.objects.select_related('author', 'location')
+        
+        # Фильтр по категории
+        additional_filters = Q(category=self.category)
+        
+        return get_posts_with_comments(
+            queryset=base_queryset,
+            user=self.request.user,
+            filter_published=True,
+            additional_filters=additional_filters
+        )
 
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
@@ -148,23 +155,35 @@ class CommentUpdateView(LoginRequiredMixin, UserPassesTestMixin, UpdateView):
     model = Comment
     template_name = 'blog/comment.html'
     form_class = CommentForm
+    
+    def get_object(self, queryset=None):
+        comment_id = self.kwargs.get('comment_id')
+        return get_object_or_404(Comment, pk=comment_id)
 
     def test_func(self):
-        return self.request.user == self.get_object().author
+        comment = self.get_object()
+        return self.request.user == comment.author
     
     def get_success_url(self):
-        return reverse('blog:post_detail', kwargs={'pk': self.object.post.pk})
+        comment = self.get_object()
+        return reverse('blog:post_detail', kwargs={'post_id': comment.post.pk})
 
 
 class CommentDeleteView(LoginRequiredMixin, UserPassesTestMixin, DeleteView):
     model = Comment
     template_name = 'blog/comment.html'
+    
+    def get_object(self, queryset=None):
+        comment_id = self.kwargs.get('comment_id')
+        return get_object_or_404(Comment, pk=comment_id)
 
     def test_func(self):
-        return self.request.user == self.get_object().author
+        comment = self.get_object()
+        return self.request.user == comment.author
 
     def get_success_url(self):
-        return reverse('blog:post_detail', kwargs={'pk': self.object.post.pk})
+        comment = self.get_object()
+        return reverse('blog:post_detail', kwargs={'post_id': comment.post.pk})
 
 
 class ProfileView(DetailView): 
@@ -188,7 +207,8 @@ class ProfileView(DetailView):
                 category__is_published=True,
                 pub_date__lte=current_time
             )
-    
+        posts = get_most_commented_posts(posts)
+
         from django.core.paginator import Paginator
         paginator = Paginator(posts.order_by('-pub_date'), 10)
         page_number = self.request.GET.get('page')
