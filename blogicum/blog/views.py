@@ -10,7 +10,7 @@ from django.views.generic import (
 from django.contrib.auth.mixins import LoginRequiredMixin, UserPassesTestMixin
 from django.contrib.auth.models import User
 from django.db.models import Q
-from blog.utils import get_posts_with_comments
+from blog.utils import get_posts_with_comments, get_paginated_page
 
 
 class PostMixin:
@@ -91,7 +91,6 @@ class PostListView(ListView):
     paginate_by = 10
 
     def get_queryset(self):
-        # Оптимизируем запрос и получаем посты с комментариями
         base_queryset = Post.objects.select_related('category', 'author', 'location')
         
         return get_posts_with_comments(
@@ -113,10 +112,8 @@ class CategoryPostListView(ListView):
             slug=self.kwargs['category_slug']
         )
         
-        # Оптимизированный базовый запрос
         base_queryset = Post.objects.select_related('author', 'location')
         
-        # Фильтр по категории
         additional_filters = Q(category=self.category)
         
         return get_posts_with_comments(
@@ -196,23 +193,21 @@ class ProfileView(DetailView):
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
         user = self.request.user
-        current_time = timezone.now()
-        
-        if user == self.object:  
-            posts = Post.objects.filter(author=self.object)
-        else: 
-            posts = Post.objects.filter(
-                author=self.object,
-                is_published=True,
-                category__is_published=True,
-                pub_date__lte=current_time
-            )
-        posts = get_most_commented_posts(posts)
 
-        from django.core.paginator import Paginator
-        paginator = Paginator(posts.order_by('-pub_date'), 10)
-        page_number = self.request.GET.get('page')
-        page_obj = paginator.get_page(page_number)
+        base_queryset = Post.objects.filter(author=self.object)
+        filter_published = (user != self.object)
+
+        posts = get_posts_with_comments(
+            queryset=base_queryset,
+            user=user if filter_published else None,
+            filter_published=filter_published
+        )
+
+        page_obj = get_paginated_page(
+            objects=posts.order_by('-pub_date'),
+            request=self.request,
+            per_page=10
+        )
         
         context['page_obj'] = page_obj
         return context
